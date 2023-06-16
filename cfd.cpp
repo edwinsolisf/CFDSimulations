@@ -1,19 +1,42 @@
-#include <iostream>
+/*******************************************************
+ * Copyright (c) 2022, ArrayFire
+ * All rights reserved.
+ *
+ * This file is distributed under 3-clause BSD license.
+ * The complete license agreement can be obtained at:
+ * http://arrayfire.com/licenses/BSD-3-Clause
+ ********************************************************/
 
-#include <arrayfire.h>
+// This is a Computational Fluid Dynamics Simulation using the Lattice Boltzmann Method
+// For this simulation we are using D2N9 (2 dimensions, 9 neighbors) with bounce-back boundary conditions
+// For more information on the simulation equations,
+// check out https://en.wikipedia.org/wiki/Lattice_Boltzmann_methods#Mathematical_equations_for_simulations
+
 #include <chrono>
+#include <iostream>
 #include <thread>
 
-size_t ycount = 128;
-size_t xcount = 128;
-float density = 2.7;
-float velocity = 0.05;
-float reynolds = 1e3;
-float viscosity = velocity * std::sqrt(xcount * ycount) / reynolds;
+#include <arrayfire.h>
 
+// Simulation Parameters
+const size_t len = 128;
+const size_t ycount = len;
+const size_t xcount = len;
+
+// Fluid Parameters
+const float density = 2.7;
+const float velocity = 0.05;
+const float reynolds = 1e5;
+const float viscosity = velocity * std::sqrt(xcount * ycount) / reynolds;
+
+// Array Quantities
 af::array ex;
 af::array ey;
 af::array wt;
+
+af::array ex_T;
+af::array ey_T;
+af::array wt_T;
 
 af::array rho;
 af::array sigma;
@@ -26,46 +49,51 @@ af::array fnew;
 
 af::array ex_;
 af::array ey_;
-af::array ux_;
-af::array uy_;
-af::array wt_;
-af::array rho_;
 
-float ex_vals[] = {
+const float ex_vals[] = {
     0.0, 1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0
 };
 
-float ey_vals[] = {
+const float ey_vals[] = {
     0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0
 };
 
-float wt_vals[] = {
+const float wt_vals[] = {
     16.0 / 36.0, 4.0 /  36.0, 4.0 / 36.0, 4.0 / 36.0, 4.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0
 };
 
-int oppos_vals[] = {
+const int oppos_vals[] = {
     0, 3, 4, 1, 2, 7, 8, 5, 6
 };
 
+/**
+ * Creates all the af::arrays that will be used throughout the program
+ * 
+ * In this function, the initial conditions and boundary conditions of the simulation are set
+ * 
+*/
 void initialize()
 {
-
-
     ex = af::array(1, 1, 9, ex_vals);
     ey = af::array(1, 1, 9, ey_vals);
     wt = af::array(1, 1, 9, wt_vals);
+
+    wt_T = af::moddims(wt, af::dim4(1,9));
 
     rho = af::constant(density, xcount, ycount, f32);
     sigma = af::constant(0, xcount, ycount, f32);
     ux = af::constant(0, xcount, ycount, f32);
     uy = af::constant(0, xcount, ycount, f32);
 
+    // This initializes the velocity field
     ux(af::span, 0) = velocity;
-    // ux(af::span, ycount - 1) = -velocity;
-    // uy(0, af::span) = velocity;
-    // uy(xcount - 1, af::span) = -velocity;
-    // ux = af::select(af::iota(af::dim4(xcount, ycount)) < xcount * ycount / 2,
-    //     af::constant(velocity, xcount, ycount), af::constant(0, xcount, ycount));
+    uy(af::span, 0) = 0.1;
+    ux(af::span, ycount - 1) = -velocity;
+    uy(af::span, ycount - 1) = -0.1;
+    ux(0, af::span) = 0.1;
+    uy(0, af::span) = -velocity;
+    ux(xcount - 1, af::span) = -0.1;
+    uy(xcount - 1, af::span) = velocity;
 
     feq = af::constant(0, xcount, ycount, 9);  
     f   = af::constant(0, xcount, ycount, 9);  
@@ -73,187 +101,229 @@ void initialize()
 
     ex_ = af::tile(ex, xcount, ycount, 1);
     ey_ = af::tile(ey, xcount, ycount, 1);
-    wt_ = af::tile(wt, xcount, ycount, 1);
 
-    ux_ = af::tile(ux, 1, 1, 9);
-    uy_ = af::tile(uy, 1, 1, 9);
-    rho_ = af::tile(rho, 1, 1, 9);
+    // Initialization of the distribution function
+    auto edotu = ex_ * ux + ey_ * uy;
+    auto udotu = ux * ux + uy * uy;
 
-    auto edotu = ex_ * ux_ + ey_ * uy_;
-    auto udotu = ux_ * ux_ + uy_ * uy_;
-
-    feq = rho_ * wt_ * ((edotu * edotu * 4.5) - (udotu * 1.5) + (edotu * 3.0) + 1.0);
+    feq = rho * wt * ((edotu * edotu * 4.5) - (udotu * 1.5) + (edotu * 3.0) + 1.0);
     f = feq;
     fnew = feq;
-    // af_print(wt_);
-    // af_print(feq);
-    // af_print(ux * ux + uy * uy);
-    // af_print(edotu);
 }
 
 void collide_stream()
 {
-    float tau = 0.5 + 3.0 * viscosity;
-    float csky = 0.16;
+    const float tau = 0.5 + 3.0 * viscosity;
+    const float csky = 0.16;
 
-    rho_ = af::tile(rho, 1, 1, 9);
-    ux_ = af::tile(ux, 1, 1, 9);
-    uy_ = af::tile(uy, 1, 1, 9);
+    auto edotu = ex_ * ux + ey_ * uy;
+    auto udotu = ux * ux + uy * uy;
 
-    auto edotu = ex_ * ux_ + ey_ * uy_;
-    auto udotu = ux_ * ux_ + uy_ * uy_;
+    // Compute the new distribution function
+    feq = rho * wt * (edotu * edotu * 4.5 - udotu * 1.5 + edotu * 3.0 + 1.0);
 
-    feq = rho_ * wt_ * (edotu * edotu * 4.5 - udotu * 1.5 + edotu * 3.0 + 1.0);
+    auto taut = af::sqrt(sigma * (csky * csky * 18.0 * 0.25) + (tau * tau * 0.25)) - (tau * 0.5);
 
-    auto taut = (af::sqrt(sigma * csky * csky * 18.0 + tau * tau) - tau) * 0.5;
-    auto tau_eff = af::tile(taut + tau, 1, 1, 9);
-    auto fplus = f - (f - feq) / tau_eff;
+    // Compute the shifted distribution functions
+    auto fplus = f - (f - feq) / (taut + tau);
 
-    af::array order_fplus = fplus;
-    af::array order_ux = af::tile(ux, 1, 1, 9);
-    af::array order_uy = af::tile(uy, 1, 1, 9);
+    af::array ux_top = ux.rows(0, 2).T();
+    af::array ux_bottom = ux.rows(xcount - 3, xcount - 1).T();
 
+    af::array uy_top = uy.rows(0, 2).T();
+    af::array uy_bottom = uy.rows(xcount - 3, xcount - 1).T();
+
+    auto ubdoute_top = af::array(ycount, 9);
+    auto ubdoute_bot = af::array(ycount, 9);
+    auto ubdoute_lft = af::array(xcount, 9);
+    auto ubdoute_rht = af::array(xcount, 9);
+    
+    // Compute new particle distribution according to the corresponding D2N9 weights
     for (int i = 0; i < 9; ++i)
     {
         int xshift = ex_vals[i];
         int yshift = ey_vals[i];
 
-        order_fplus(af::span, af::span, i) = af::shift(fplus(af::span, af::span, i), xshift, yshift);
-
-        order_ux(af::span, af::span, i) = af::shift(ux, xshift, yshift);
-        order_uy(af::span, af::span, i) = af::shift(uy, xshift, yshift);
+        fplus(af::span, af::span, i) = af::shift(fplus(af::span, af::span, i), xshift, yshift);
+        
+        // Computing u dot e at the each of the boundaries
+        // ubdoute_top.col(i) = af::pad(ux_top, af::)
+        ubdoute_top.col(i) = ux_top.col(1-xshift)        * ex_vals[i] + uy_top.col(1-xshift)        * ey_vals[i];
+        ubdoute_bot.col(i) = ux_bottom.col(1-xshift)     * ex_vals[i] + uy_bottom.col(1-xshift)     * ey_vals[i];
+        ubdoute_lft.col(i) = ux.col(1-yshift)            * ex_vals[i] + uy.col(1-yshift)            * ey_vals[i];
+        ubdoute_rht.col(i) = ux.col(ycount - 2 - yshift) * ex_vals[i] + uy.col(ycount - 2 - yshift) * ey_vals[i];
     }
 
-    order_fplus(0, af::span, af::span) = fnew(0, af::span, af::span);
-    order_fplus(xcount - 1, af::span, af::span) = fnew(xcount - 1, af::span, af::span);
-    order_fplus(af::span, 0, af::span) = fnew(af::span, 0, af::span);
-    order_fplus(af::span, ycount - 1, af::span) = fnew(af::span, ycount - 1, af::span);
+    // Keep the boundary conditions at the borders the same
+    fplus.row(0)          = fnew.row(0);
+    fplus.row(xcount - 1) = fnew.row(xcount - 1);
+    fplus.col(0)          = fnew.col(0);
+    fplus.col(ycount - 1) = fnew.col(ycount - 1);
 
-    fnew = order_fplus;
+    // Update the particle distribution
+    fnew = fplus;
 
-    // auto ubdoute = order_ux * ex_ + order_uy * ey_;
-    // auto temp = order_fplus - 6.0 * density * wt_ * ubdoute;
+    // Computing bounce-back boundary conditions
+    auto fnew_top = af::moddims(fplus(         1,  af::span, af::span), af::dim4(ycount, 9)) - 6.0 * density * wt_T * ubdoute_top;
+    auto fnew_bot = af::moddims(fplus(xcount - 2,  af::span, af::span), af::dim4(ycount, 9)) - 6.0 * density * wt_T * ubdoute_bot;
+    auto fnew_lft = af::moddims(fplus( af::span,          1, af::span), af::dim4(xcount, 9)) - 6.0 * density * wt_T * ubdoute_lft;
+    auto fnew_rht = af::moddims(fplus( af::span, ycount - 2, af::span), af::dim4(xcount, 9)) - 6.0 * density * wt_T * ubdoute_rht;
 
-    // for (int i = 0; i < 9; ++i)
-    // {
-    //     int xshift = ex(i).scalar<float>();
-    //     int yshift = ey(i).scalar<float>();
-    //     if (xshift == 1)
-    //         fnew(1, af::span, oppos_vals[i]) = temp(1, af::span, i);
-    //     if (xshift == -1)
-    //         fnew(xcount - 2, af::span, oppos_vals[i]) = temp(xcount - 2, af::span, i);
-    //     if (yshift == 1)
-    //         fnew(af::span, 1, oppos_vals[i]) = temp(af::span, 1, i);
-    //     if (yshift == -1)
-    //         fnew(af::span, ycount - 2, oppos_vals[i]) = temp(af::span, ycount - 2, i);
-    // }
-
-    // fnew(0, af::span, af::span) = order_fplus(0, af::span, af::span);
-    // fnew(xcount - 1, af::span, af::span) = order_fplus(xcount - 1, af::span, af::span);
-    // fnew(af::span, 0, af::span) = order_fplus(af::span, 0, af::span);
-    // fnew(af::span, ycount - 1, af::span) = order_fplus(af::span, ycount - 1, af::span);
+    // Sets the values near the boundaries with the correct bounce-back boundary
+    for (int i = 0; i < 9; ++i)
+    {
+        int xshift = ex_vals[i];
+        int yshift = ey_vals[i];
+        if (xshift == 1)
+            fnew(         1,   af::span, oppos_vals[i]) = fnew_top(af::span, i);
+        if (xshift == -1)
+            fnew(xcount - 2,   af::span, oppos_vals[i]) = fnew_bot(af::span, i);
+        if (yshift == 1)
+            fnew(  af::span,          1, oppos_vals[i]) = fnew_lft(af::span, i);
+        if (yshift == -1)
+            fnew(  af::span, ycount - 2, oppos_vals[i]) = fnew_rht(af::span, i);
+    }
 }
 
+/**
+ * Updates the velocity field, density and strain at each point in the grid
+*/
 void update()
 {
     f = fnew;
-    rho = af::sum(fnew, 2);
 
-    af::array velx, vely;
-    velx = af::sum(fnew * ex_, 2);
-    vely = af::sum(fnew * ey_, 2);
+    auto f_tile = af::tile(f, af::dim4(1,1,1,3));
+    auto e_tile = af::join(3, af::constant(1, xcount, ycount, 9), ex_, ey_);
+    auto result = af::sum(f_tile * e_tile, 2);
 
-    ux = velx / rho;
-    uy = vely / rho;
+    rho = result(af::span, af::span, af::span, 0);
+    result /= rho;
+    ux = result(af::span, af::span, af::span, 1);
+    uy = result(af::span, af::span, af::span, 2);
+
+    // Above code equivalent to 
+    // rho = af::sum(f, 2);
+    // ux = af::sum(f * ex_) / rho;
+    // uy = af::sum(f * ey_) / rho;
 
     auto product = fnew - feq;
     auto temp = af::tile(product, af::dim4(1,1,1,3));
+
     temp(af::span, af::span, af::span, 0) *= ex_ * ex_;
     temp(af::span, af::span, af::span, 1) *= ey_ * ex_;
     temp(af::span, af::span, af::span, 2) *= ey_ * ey_;
-    // auto xx = af::sum(product * ex_ * ex_, 2);
-    // auto xy = af::sum(product * ex_ * ey_, 2);
-    // auto yy = af::sum(product * ey_ * ey_, 2);
-    // auto xxsum = product * ex_ * ex_;
-    // auto xysum = product * ey_ * ex_;
-    // auto yysum = product * ey_ * ey_;
-
-    // af::eval(xxsum, yysum, xysum);
-    
-    // auto temp = af::join(3, xxsum, xysum);
-    // temp = af::join(3, temp, yysum);
-
     temp = af::sum(temp, 2);
     temp *= temp;
 
     sigma = af::sqrt(temp(af::span, af::span, af::span, 0) +
                      temp(af::span, af::span, af::span, 1) * 2 +
                      temp(af::span, af::span, af::span, 2));
-
-    // auto xx = af::sum(xxsum, 2);
-    // auto xy = af::sum(xysum, 2);
-    // auto yy = af::sum(yysum, 2);
+    
+    // Above code equivalent to
+    // auto xx = af::sum(product * ex_ * ex_, 2);
+    // auto xy = af::sum(product * ex_ * ey_, 2);
+    // auto yy = af::sum(product * ey_ * ey_, 2);
 
     // sigma = af::sqrt(xx * xx + xy * xy * 2 + yy * yy);
 }
 
 int main(int argc, char** argv)
 {
-    int steps = 4;
+    int frame_count = 0;
+    int max_frames = 20000;
+    int simulation_frames = 100;
+    float scale = 1.0f;
+    float total_time = 0;
+    float total_time2 = 0;
+
+    double avga = 0;
+    double avga2 = 0;
+    double avgb = 0;
+    double avgb2 = 0;
+
+    // Forge window initialization
+    af::Window window(ycount * scale, xcount * scale, "Hello world");
+
+    // Simulation code
 
     initialize();
 
-    af::Window window(xcount, ycount, "Hello world");
-    int max_frames = 10000;
-    int frame_count = 0;
-    int frame = 0;
     while(!window.close() && frame_count != max_frames)
     {
         frame_count++;
 
         af::sync();
         auto begin = std::chrono::high_resolution_clock::now();
+
         collide_stream();
+        
         af::sync();
         auto middle = std::chrono::high_resolution_clock::now();
+        
         update();
+        
         af::sync();
         auto end = std::chrono::high_resolution_clock::now();
-        // af_print(feq);
-        // af_print(f);
+
         auto dur = std::chrono::duration_cast<std::chrono::microseconds>(middle - begin).count();
         auto dur2 = std::chrono::duration_cast<std::chrono::microseconds>(end - middle).count();
         auto total = dur + dur2;
 
-        std::cout << "First part: " << dur << " us; Second part: " << dur2 << " us; Total: " << total << " us" << std::endl;
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
 
-        // af_print(sigma);
-        // std::cout << 1.0e6/(float)std::chrono::duration_cast<std::chrono::microseconds>(end-begin).count() << std::endl;
+        avga += dur;
+        avga2 += dur * dur;
+        avgb += dur2;
+        avgb2 += dur2 * dur2;
 
-        if (frame % 100 == 0)
+        total_time += duration;
+        total_time2 += duration * duration;
+
+        if (frame_count % simulation_frames == 0)
         {
+            // Relative Flow speed at each cell
             auto val = af::sqrt(ux * ux + uy * uy)/velocity;
-            auto image = af::constant(0, xcount, ycount, 3);
+
+            // Scaling and interpolating flow speed to the window size
+            if (scale > 1.0)
+                val = af::approx2(val, af::iota(xcount * scale, af::dim4(1, ycount * scale)) / scale, af::iota(ycount * scale, af::dim4(1, xcount * scale)).T() / scale);
+            
+            // Flip image
+            val = val.T();
+
+            auto image = af::constant(0, ycount * scale, xcount * scale, 3);
             auto image2 = image;
 
-            image(af::span, af::span, 0) = val.T() * 2;
-            image(af::span, af::span, 1) = val.T() * 2;
-            image(af::span, af::span, 2) = 1.0 - val.T() * 2;
+            // Add custom coloring
+            image(af::span, af::span, 0) = val * 2;
+            image(af::span, af::span, 1) = val * 2;
+            image(af::span, af::span, 2) = 1.0 - val * 2;
         
             image2(af::span, af::span, 0) = 1;
-            image2(af::span, af::span, 1) = -2*val.T() + 2;
+            image2(af::span, af::span, 1) = -2*val + 2;
             image2(af::span, af::span, 2) = 0;
             
-            image = af::select(af::tile(val.T(), 1, 1, 3) > 0.5, image2, image);
+            image = af::select(af::tile(val, 1, 1, 3) > 0.5, image2, image);
 
+            // Display colored image
             window.image(image);
-            frame = 0;
+
+            float avg_time = total_time / (float) simulation_frames;
+            float stdv_time = std::sqrt(total_time2 *simulation_frames - total_time * total_time) / (float)simulation_frames;
+
+            std::cout << "Average Simulation Step Time: (" << avg_time << " +/- " << stdv_time
+                    << ") us; Total simulation time: " << total_time << " us; Simulation Frames: " << simulation_frames
+                    << std::endl;
+
+            total_time = 0;
+            total_time2 = 0;
         }
-        frame++;
-        
-        using namespace std::chrono_literals;
-        // std::this_thread::sleep_for(100ms);
     }
+
+    std::cout << "First Part: (" << avga / frame_count << " +- " << std::sqrt(avga2 * frame_count - avga * avga) / frame_count
+              << ") us; Second Part: (" << avgb / frame_count << " +- " << std::sqrt(avgb2 * frame_count - avgb * avgb) / frame_count
+              << ") us; Total: (" << (avga + avgb) / frame_count << " +- " << std::sqrt(avga2 * frame_count - avga * avga + avgb2 * frame_count - avgb * avgb) / frame_count
+              << ") us" << std::endl;
 
     return 0;
 }
