@@ -138,6 +138,8 @@ void collide_stream()
     auto ubdoute_lft = af::array(xcount, 9);
     auto ubdoute_rht = af::array(xcount, 9);
     
+    auto ux_pad = af::pad(ux, af::dim4(2,2,0,0), af::dim4(2,2,0,0), af::borderType::AF_PAD_SYM);
+
     // Compute new particle distribution according to the corresponding D2N9 weights
     for (int i = 0; i < 9; ++i)
     {
