@@ -87,13 +87,14 @@ void initialize()
 
     // This initializes the velocity field
     ux(af::span, 0) = velocity;
-    uy(af::span, 0) = 0.1;
-    ux(af::span, ycount - 1) = -velocity;
-    uy(af::span, ycount - 1) = -0.1;
-    ux(0, af::span) = 0.1;
-    uy(0, af::span) = -velocity;
-    ux(xcount - 1, af::span) = -0.1;
-    uy(xcount - 1, af::span) = velocity;
+    // uy(af::span, 0) = 0.1;
+    // ux(af::span, ycount - 1) = -velocity;
+    // uy(af::span, ycount - 1) = -0.1;
+    // ux(0, af::span) = 0.1;
+    // uy(0, af::span) = -velocity;
+    // ux(xcount - 1, af::span) = -0.1;
+    // uy(xcount - 1, af::span) = velocity;
+    // ux(af::span, ycount / 2) = velocity;
 
     feq = af::constant(0, xcount, ycount, 9);  
     f   = af::constant(0, xcount, ycount, 9);  
@@ -137,8 +138,6 @@ void collide_stream()
     auto ubdoute_bot = af::array(ycount, 9);
     auto ubdoute_lft = af::array(xcount, 9);
     auto ubdoute_rht = af::array(xcount, 9);
-    
-    auto ux_pad = af::pad(ux, af::dim4(2,2,0,0), af::dim4(2,2,0,0), af::borderType::AF_PAD_SYM);
 
     // Compute new particle distribution according to the corresponding D2N9 weights
     for (int i = 0; i < 9; ++i)
@@ -149,7 +148,6 @@ void collide_stream()
         fplus(af::span, af::span, i) = af::shift(fplus(af::span, af::span, i), xshift, yshift);
         
         // Computing u dot e at the each of the boundaries
-        // ubdoute_top.col(i) = af::pad(ux_top, af::)
         ubdoute_top.col(i) = ux_top.col(1-xshift)        * ex_vals[i] + uy_top.col(1-xshift)        * ey_vals[i];
         ubdoute_bot.col(i) = ux_bottom.col(1-xshift)     * ex_vals[i] + uy_bottom.col(1-xshift)     * ey_vals[i];
         ubdoute_lft.col(i) = ux.col(1-yshift)            * ex_vals[i] + uy.col(1-yshift)            * ey_vals[i];

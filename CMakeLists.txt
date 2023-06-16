@@ -11,8 +11,8 @@ find_package(OpenGL REQUIRED)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED true)
 
-add_executable(div div.cpp)
-target_link_libraries(div PUBLIC ArrayFire::afcuda Forge::forge)
+# add_executable(div div.cpp)
+# target_link_libraries(div PUBLIC ArrayFire::afcuda Forge::forge)
 
 add_executable(discrete discrete.cpp)
 target_link_libraries(discrete PUBLIC ArrayFire::afcuda Forge::forge)

@@ -18,11 +18,11 @@ std::array<af::array, 3> grad2(const af::array& vals, double delta_x, double del
     auto down = af::shift(vals, 0, -1);
     auto& center = vals;
 
-    double vals[] = {
-        0.0, 0.0, 0.0,
-        1.0, -2.0, 1.0,
-        0.0, 0.0, 1.0
-    };
+    // double vals[] = {
+    //     0.0, 0.0, 0.0,
+    //     1.0, -2.0, 1.0,
+    //     0.0, 0.0, 1.0
+    // };
 
     // auto filter = af::array(3, 3, vals);
     // dx2 = af::convolve2(vals, filter);
