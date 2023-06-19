@@ -24,10 +24,10 @@ const size_t ycount = len;
 const size_t xcount = len;
 
 // Fluid Parameters
-const float density = 2.7;
-const float velocity = 0.05;
-const float reynolds = 1e5;
-const float viscosity = velocity * std::sqrt(xcount * ycount) / reynolds;
+const float density = 2.7f;
+const float velocity = 0.05f;
+const float reynolds = 1e3f;
+const float viscosity = velocity * std::sqrt(static_cast<float>(xcount * ycount)) / reynolds;
 
 // Array Quantities
 af::array ex;
@@ -51,19 +51,21 @@ af::array ex_;
 af::array ey_;
 
 const float ex_vals[] = {
-    0.0, 1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0
+    1.0, 1.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0
 };
 
 const float ey_vals[] = {
-    0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0
+    1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, -1.0
 };
 
 const float wt_vals[] = {
-    16.0 / 36.0, 4.0 /  36.0, 4.0 / 36.0, 4.0 / 36.0, 4.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0
+    1.0f / 36.0f,  4.0f / 36.0f, 1.0f / 36.0f,
+    4.0f / 36.0f, 16.0f / 36.0f, 4.0f / 36.0f,
+    1.0f / 36.0f,  4.0f / 36.0f, 1.0f / 36.0f
 };
 
 const int oppos_vals[] = {
-    0, 3, 4, 1, 2, 7, 8, 5, 6
+    8, 7, 6, 5, 4, 3, 2, 1, 0
 };
 
 /**
@@ -78,6 +80,8 @@ void initialize()
     ey = af::array(1, 1, 9, ey_vals);
     wt = af::array(1, 1, 9, wt_vals);
 
+    ex_T = af::array(1, 9, ex_vals);
+    ey_T = af::array(1, 9, ey_vals);
     wt_T = af::moddims(wt, af::dim4(1,9));
 
     rho = af::constant(density, xcount, ycount, f32);
@@ -94,11 +98,10 @@ void initialize()
     // uy(0, af::span) = -velocity;
     // ux(xcount - 1, af::span) = -0.1;
     // uy(xcount - 1, af::span) = velocity;
-    // ux(af::span, ycount / 2) = velocity;
 
-    feq = af::constant(0, xcount, ycount, 9);  
-    f   = af::constant(0, xcount, ycount, 9);  
-    fnew = af::constant(0, xcount, ycount, 9);
+    feq  = af::constant(0, xcount, ycount, 9, f32);  
+    f    = af::constant(0, xcount, ycount, 9, f32);  
+    fnew = af::constant(0, xcount, ycount, 9, f32);
 
     ex_ = af::tile(ex, xcount, ycount, 1);
     ey_ = af::tile(ey, xcount, ycount, 1);
@@ -114,44 +117,28 @@ void initialize()
 
 void collide_stream()
 {
-    const float tau = 0.5 + 3.0 * viscosity;
-    const float csky = 0.16;
+    const float tau = 0.5f + 3.0f * viscosity;
+    const float csky = 0.16f;
 
     auto edotu = ex_ * ux + ey_ * uy;
     auto udotu = ux * ux + uy * uy;
 
     // Compute the new distribution function
-    feq = rho * wt * (edotu * edotu * 4.5 - udotu * 1.5 + edotu * 3.0 + 1.0);
+    feq = rho * wt * (edotu * edotu * 4.5f - udotu * 1.5f + edotu * 3.0f + 1.0f);
 
-    auto taut = af::sqrt(sigma * (csky * csky * 18.0 * 0.25) + (tau * tau * 0.25)) - (tau * 0.5);
+    auto taut = af::sqrt(sigma * (csky * csky * 18.0f * 0.25f) + (tau * tau * 0.25f)) - (tau * 0.5f);
 
     // Compute the shifted distribution functions
     auto fplus = f - (f - feq) / (taut + tau);
 
-    af::array ux_top = ux.rows(0, 2).T();
-    af::array ux_bottom = ux.rows(xcount - 3, xcount - 1).T();
-
-    af::array uy_top = uy.rows(0, 2).T();
-    af::array uy_bottom = uy.rows(xcount - 3, xcount - 1).T();
-
-    auto ubdoute_top = af::array(ycount, 9);
-    auto ubdoute_bot = af::array(ycount, 9);
-    auto ubdoute_lft = af::array(xcount, 9);
-    auto ubdoute_rht = af::array(xcount, 9);
 
     // Compute new particle distribution according to the corresponding D2N9 weights
     for (int i = 0; i < 9; ++i)
     {
-        int xshift = ex_vals[i];
-        int yshift = ey_vals[i];
+        int xshift = static_cast<int>(ex_vals[i]);
+        int yshift = static_cast<int>(ey_vals[i]);
 
         fplus(af::span, af::span, i) = af::shift(fplus(af::span, af::span, i), xshift, yshift);
-        
-        // Computing u dot e at the each of the boundaries
-        ubdoute_top.col(i) = ux_top.col(1-xshift)        * ex_vals[i] + uy_top.col(1-xshift)        * ey_vals[i];
-        ubdoute_bot.col(i) = ux_bottom.col(1-xshift)     * ex_vals[i] + uy_bottom.col(1-xshift)     * ey_vals[i];
-        ubdoute_lft.col(i) = ux.col(1-yshift)            * ex_vals[i] + uy.col(1-yshift)            * ey_vals[i];
-        ubdoute_rht.col(i) = ux.col(ycount - 2 - yshift) * ex_vals[i] + uy.col(ycount - 2 - yshift) * ey_vals[i];
     }
 
     // Keep the boundary conditions at the borders the same
@@ -163,17 +150,38 @@ void collide_stream()
     // Update the particle distribution
     fnew = fplus;
 
+    // Computing u dot e at the each of the boundaries
+    af::array ux_top = ux.rows(0, 2);
+    ux_top = af::moddims(af::tile(ux_top, af::dim4(1, 3)).T(), af::dim4(ycount , 9));
+    af::array ux_bot = ux.rows(xcount - 3, xcount - 1);
+    ux_bot = af::moddims(af::tile(ux_bot, af::dim4(1, 3)).T(), af::dim4(ycount , 9));
+
+    af::array uy_top = uy.rows(0, 2);
+    uy_top = af::moddims(af::tile(uy_top, af::dim4(1, 3)).T(), af::dim4(ycount , 9));
+    af::array uy_bot = uy.rows(xcount - 3, xcount - 1);
+    uy_bot = af::moddims(af::tile(uy_bot, af::dim4(1, 3)).T(), af::dim4(ycount , 9));
+    
+    auto ux_lft = af::tile(ux.cols(0, 2), af::dim4(1, 3));
+    auto uy_lft = af::tile(uy.cols(0, 2), af::dim4(1, 3));
+    auto ux_rht = af::tile(ux.cols(ycount - 3, ycount - 1), af::dim4(1, 3));
+    auto uy_rht = af::tile(uy.cols(ycount - 3, ycount - 1), af::dim4(1, 3));
+
+    auto ubdoute_top = ux_top * ex_T + uy_top * ey_T;
+    auto ubdoute_bot = ux_bot * ex_T + uy_bot * ey_T;
+    auto ubdoute_lft = ux_lft * ex_T + uy_lft * ey_T;
+    auto ubdoute_rht = ux_rht * ex_T + uy_rht * ey_T;
+
     // Computing bounce-back boundary conditions
     auto fnew_top = af::moddims(fplus(         1,  af::span, af::span), af::dim4(ycount, 9)) - 6.0 * density * wt_T * ubdoute_top;
     auto fnew_bot = af::moddims(fplus(xcount - 2,  af::span, af::span), af::dim4(ycount, 9)) - 6.0 * density * wt_T * ubdoute_bot;
     auto fnew_lft = af::moddims(fplus( af::span,          1, af::span), af::dim4(xcount, 9)) - 6.0 * density * wt_T * ubdoute_lft;
     auto fnew_rht = af::moddims(fplus( af::span, ycount - 2, af::span), af::dim4(xcount, 9)) - 6.0 * density * wt_T * ubdoute_rht;
 
-    // Sets the values near the boundaries with the correct bounce-back boundary
+    // Update the values near the boundaries with the correct bounce-back boundary
     for (int i = 0; i < 9; ++i)
     {
-        int xshift = ex_vals[i];
-        int yshift = ey_vals[i];
+        int xshift = static_cast<int>(ex_vals[i]);
+        int yshift = static_cast<int>(ey_vals[i]);
         if (xshift == 1)
             fnew(         1,   af::span, oppos_vals[i]) = fnew_top(af::span, i);
         if (xshift == -1)
@@ -242,7 +250,9 @@ int main(int argc, char** argv)
     double avgb2 = 0;
 
     // Forge window initialization
-    af::Window window(ycount * scale, xcount * scale, "Hello world");
+    int height = static_cast<int>(ycount * scale);
+    int width  = static_cast<int>(xcount * scale);
+    af::Window window(height, width, "Driven Cavity Flow");
 
     // Simulation code
 
@@ -286,12 +296,12 @@ int main(int argc, char** argv)
 
             // Scaling and interpolating flow speed to the window size
             if (scale > 1.0)
-                val = af::approx2(val, af::iota(xcount * scale, af::dim4(1, ycount * scale)) / scale, af::iota(ycount * scale, af::dim4(1, xcount * scale)).T() / scale);
+                val = af::approx2(val, af::iota(width, af::dim4(1, height)) / scale, af::iota(height, af::dim4(1, width)).T() / scale);
             
             // Flip image
             val = val.T();
 
-            auto image = af::constant(0, ycount * scale, xcount * scale, 3);
+            auto image = af::constant(0, height, width, 3);
             auto image2 = image;
 
             // Add custom coloring
