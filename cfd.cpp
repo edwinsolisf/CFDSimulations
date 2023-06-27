@@ -1,19 +1,20 @@
 /*******************************************************
- * Copyright (c) 2022, ArrayFire
+ * Copyright (c) 2023, ArrayFire
  * All rights reserved.
  *
  * This file is distributed under 3-clause BSD license.
  * The complete license agreement can be obtained at:
  * http://arrayfire.com/licenses/BSD-3-Clause
  ********************************************************/
-/*
-This is a Computational Fluid Dynamics Simulation using the Lattice Boltzmann Method
-For this simulation we are using D2N9 (2 dimensions, 9 neighbors) with bounce-back boundary conditions
-For more information on the simulation equations,
-check out https://en.wikipedia.org/wiki/Lattice_Boltzmann_methods#Mathematical_equations_for_simulations
 
-The initial conditions of the fluid are obtained from three images that specify their properties using the function
-read_initial_condition_arrays. These images can be modified to simulate different cases
+/*
+    This is a Computational Fluid Dynamics Simulation using the Lattice Boltzmann Method
+    For this simulation we are using D2N9 (2 dimensions, 9 neighbors) with bounce-back boundary conditions
+    For more information on the simulation equations,
+    check out https://en.wikipedia.org/wiki/Lattice_Boltzmann_methods#Mathematical_equations_for_simulations
+
+    The initial conditions of the fluid are obtained from three images that specify their properties using the function
+    read_initial_condition_arrays. These images can be modified to simulate different cases
 */
 
 #include <chrono>
@@ -22,84 +23,132 @@ read_initial_condition_arrays. These images can be modified to simulate differen
 
 #include <arrayfire.h>
 
-// Array Quantities
-af::array ex;
-af::array ey;
-af::array wt;
+/*
+    Values of the D2N9 grid follow the following order structure:
 
-af::array ex_T;
-af::array ey_T;
-af::array wt_T;
 
-af::array ex_;
-af::array ey_;
+          -1      0       1
+      * ----------------------> x
+  -1   |   6      3       0
+       | 
+   0   |   7      4       1
+       |   
+   1   |   8      5       2
+       |
+       v
+       y
 
-const float ex_vals[] = {
+    The (-1, 0, 1) refer to the x and y offsets with respect to a single cell
+    and the (0-8) refer to indices of each cell in the 3x3 grid 
+
+    Eg. Element with index 4 is the center of the grid which has an x-offset = ex_vals[4] = 0 and y-offset = ey_vals[4] = 0
+        with its quantities being weighted with weight wt_vals[4] = 16/36
+*/
+
+static const float ex_vals[] = {
     1.0, 1.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0
 };
 
-const float ey_vals[] = {
+static const float ey_vals[] = {
     1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, -1.0
 };
 
-const float wt_vals[] = {
+static const float wt_vals[] = {
     1.0f / 36.0f,  4.0f / 36.0f, 1.0f / 36.0f,
     4.0f / 36.0f, 16.0f / 36.0f, 4.0f / 36.0f,
     1.0f / 36.0f,  4.0f / 36.0f, 1.0f / 36.0f
 };
 
-const int oppos_vals[] = {
+static const int opposite_indices[] = {
     8, 7, 6, 5, 4, 3, 2, 1, 0
 };
 
-
-struct InitialConditions
+struct Simulation
 {
-    af::array ux;
-    af::array uy;
-    af::array set_boundaries;
-};
-
-struct SimulationQuantities
-{
+    // Fluid quantities
     af::array ux;
     af::array uy;
     af::array rho;
     af::array sigma;
     af::array f;
     af::array feq;
+
+    // Constant velocity boundary conditions positions
     af::array set_boundaries;
-    size_t grid_width;
-    size_t grid_height;
+
+    // Simulation Parameters
+    uint32_t grid_width;
+    uint32_t grid_height;
     float density;
     float velocity;
     float reynolds;
 
-    SimulationQuantities(size_t grid_width_, size_t grid_height_, float density_, float velocity_, float reynolds_number_)
-        : grid_width(grid_width_), grid_height(grid_height_),
-          density(density_), velocity(velocity_), reynolds(reynolds_number_)
-    {   
-    }
+    // Helper arrays stored for computation
+    af::array ex;
+    af::array ey;
+    af::array wt;
+
+    af::array ex_T;
+    af::array ey_T;
+    af::array wt_T;
+
+    af::array ex_;
+    af::array ey_;
 };
 
-InitialConditions read_initial_condition_arrays(size_t grid_width, size_t grid_height, float velocity,
-                                                const char* ux_image_filename,
-                                                const char* uy_image_filename,
-                                                const char* boundaries_filename)
+/**
+ * @brief Create a simulation object containing all the initial parameters and condition of the simulation
+ * 
+ * @details
+ * For the ux, uy, and boundary images, we use RGB values for to define the specific quantites for each grid cell/pixel
+ * 
+ * /// R & B for ux & uy
+ * 
+ * For ux and uy, Red means positive value while Blue means negative value. The speed value for both ux and uy is computed 
+ * as $(R - B) * velocity / 255$.
+ * 
+ * For example, for the same pixel in the two images if we had ux = RGB(255,0,0) and uy = RGB(0,0,255)
+ * means that cell's fluid has an x-velocity of +v and y-velocity of -v where v is the velocity quantity pass to this function.
+ * 
+ * Note that having the same value in the R and B components will cancel each other out, i.e.,
+ * have the fluid has 0 velocity in that direction similar to having it be 0.
+ * 
+ * /// G for ux & uy
+ * 
+ * The G component is reserved for an object or obstacle. Any non-zero value for the green component
+ * represents a hard boundary in the simulation
+ * 
+ * /// RGB for boundary
+ * 
+ * Any non-zero value for any of the components in the RGB value of the pixel means that the
+ * initial values passed for ux and uy will remain constant throught the simulation
+ * 
+ */
+Simulation create_simulation(uint32_t grid_width, uint32_t grid_height,
+                             float density, float velocity, float reynolds, 
+                             const char* ux_image_filename,
+                             const char* uy_image_filename,
+                             const char* boundaries_filename)
 {
-    InitialConditions vals;
+    Simulation sim;
+
+    sim.grid_width  = grid_width;
+    sim.grid_height = grid_height;
+    sim.velocity    = velocity;
+    sim.density     = density;
+    sim.reynolds    = reynolds;
 
     try
     {
-        vals.ux = af::loadImage(ux_image_filename, true);
+        sim.ux = af::loadImage(ux_image_filename, true);
     }
     catch(const af::exception& e)
     {
         std::cerr << e.what() << std::endl;
-        vals.ux = af::constant(0, grid_width, grid_height, 3);
+        sim.ux = af::constant(0, grid_width, grid_height, 3);
     }
 
-    auto ux_dim = vals.ux.dims();
+    auto ux_dim = sim.ux.dims();
     if (ux_dim[0] != grid_width || ux_dim[1] != grid_height)
     {
         std::cerr << "Fluid flow ux image has dimensions different to the simulation" << std::endl;
@@ -108,15 +157,15 @@ InitialConditions read_initial_condition_arrays(size_t grid_width, size_t grid_h
 
     try
     {
-        vals.uy = af::loadImage(uy_image_filename, true);
+        sim.uy = af::loadImage(uy_image_filename, true);
     }
     catch(const af::exception& e)
     {
         std::cerr << e.what() << std::endl;
-        vals.uy = af::constant(0, grid_width, grid_height, 3);
+        sim.uy = af::constant(0, grid_width, grid_height, 3);
     }
     
-    auto uy_dim = vals.uy.dims();
+    auto uy_dim = sim.uy.dims();
     if (uy_dim[0] != grid_width || uy_dim[1] != grid_height)
     {
         std::cerr << "Fluid flow uy image has dimensions different to the simulation" << std::endl;
@@ -125,48 +174,54 @@ InitialConditions read_initial_condition_arrays(size_t grid_width, size_t grid_h
 
     try
     {
-        vals.set_boundaries = af::loadImage(boundaries_filename, false);
+        sim.set_boundaries = af::loadImage(boundaries_filename, false);
     }
     catch(const af::exception& e)
     {
         std::cerr << e.what() << std::endl;
-        vals.set_boundaries = af::constant(0, grid_width, grid_height, 3);
+        sim.set_boundaries = af::constant(0, grid_width, grid_height, 3);
     }
     
-    auto b_dim = vals.set_boundaries.dims();
+    auto b_dim = sim.set_boundaries.dims();
     if (b_dim[0] != grid_width || b_dim[1] != grid_height)
     {
         std::cerr << "Fluid boundary image has dimensions different to the simulation" << std::endl;
         throw std::runtime_error{"Fluid boundary image has dimensions different to the simulation"};
     }
 
-    vals.ux = (vals.ux(af::span, af::span, 0).T() - vals.ux(af::span, af::span, 2).T()) * velocity / 255.f;
-    vals.uy = (vals.uy(af::span, af::span, 0).T() - vals.uy(af::span, af::span, 2).T()) * velocity / 255.f;
-    vals.set_boundaries = vals.set_boundaries.T() > 0;
+    sim.ux = (sim.ux(af::span, af::span, 0).T() - sim.ux(af::span, af::span, 2).T()) * velocity / 255.f;
+    sim.uy = (sim.uy(af::span, af::span, 0).T() - sim.uy(af::span, af::span, 2).T()) * velocity / 255.f;
+    sim.set_boundaries = sim.set_boundaries.T() > 0;
 
-    return vals;
+    return sim;
 }
 
 /**
- * Creates all the af::arrays that will be used throughout the program
+ * @brief Initializes internal values used for computation
  * 
- * In this function, the initial conditions and boundary conditions of the simulation are set
- * 
-*/
-void initialize(SimulationQuantities& simulation,
-                const char* ux_image_filename, const char* uy_image_filename, const char* boundary_image_filename)
+ */
+void initialize(Simulation& sim)
 {
-    auto& ux = simulation.ux;
-    auto& uy = simulation.uy;
-    auto& rho = simulation.rho;
-    auto& sigma = simulation.sigma;
-    auto& f = simulation.f;
-    auto& feq = simulation.feq;
-    auto& set_boundaries = simulation.set_boundaries;
-    auto density = simulation.density;
-    auto velocity = simulation.velocity;
-    auto xcount = simulation.grid_width;
-    auto ycount = simulation.grid_height;
+    auto& ux             = sim.ux;
+    auto& uy             = sim.uy;
+    auto& rho            = sim.rho;
+    auto& sigma          = sim.sigma;
+    auto& f              = sim.f;
+    auto& feq            = sim.feq;
+
+    auto& ex   = sim.ex;
+    auto& ey   = sim.ey;
+    auto& wt   = sim.wt;
+    auto& ex_  = sim.ex_;
+    auto& ey_  = sim.ey_;
+    auto& ex_T = sim.ex_T;
+    auto& ey_T = sim.ey_T;
+    auto& wt_T = sim.wt_T;
+
+    auto density  = sim.density;
+    auto velocity = sim.velocity;
+    auto xcount   = sim.grid_width;
+    auto ycount   = sim.grid_height;
 
     ex = af::array(1, 1, 9, ex_vals);
     ey = af::array(1, 1, 9, ey_vals);
@@ -178,17 +233,6 @@ void initialize(SimulationQuantities& simulation,
 
     rho = af::constant(density, xcount, ycount, f32);
     sigma = af::constant(0, xcount, ycount, f32);
-    ux = af::constant(0, xcount, ycount, f32);
-    uy = af::constant(0, xcount, ycount, f32);
-
-    // This initializes the velocity field
-    auto vals = read_initial_condition_arrays(xcount, ycount, velocity,
-                                              ux_image_filename,
-                                              uy_image_filename,
-                                              boundary_image_filename);
-    ux = vals.ux;
-    uy = vals.uy;
-    set_boundaries = vals.set_boundaries;
 
     f   = af::constant(0, xcount, ycount, 9, f32);
 
@@ -203,20 +247,34 @@ void initialize(SimulationQuantities& simulation,
     f = feq;
 }
 
-void collide_stream(SimulationQuantities& simulation)
+/**
+ * @brief Updates the particle distribution functions for the new simulation frame
+ * 
+ */
+void collide_stream(Simulation& sim)
 {
-    auto& ux = simulation.ux;
-    auto& uy = simulation.uy;
-    auto& rho = simulation.rho;
-    auto& sigma = simulation.sigma;
-    auto& f = simulation.f;
-    auto& feq = simulation.feq;
-    const auto& set_boundaries = simulation.set_boundaries;
-    auto density = simulation.density;
-    auto velocity = simulation.velocity;
-    auto xcount = simulation.grid_width;
-    auto ycount = simulation.grid_height;
-    auto reynolds = simulation.reynolds;
+    auto& ux             = sim.ux;
+    auto& uy             = sim.uy;
+    auto& rho            = sim.rho;
+    auto& sigma          = sim.sigma;
+    auto& f              = sim.f;
+    auto& feq            = sim.feq;
+    auto& set_boundaries = sim.set_boundaries;
+
+    auto& ex   = sim.ex;
+    auto& ey   = sim.ey;
+    auto& wt   = sim.wt;
+    auto& ex_  = sim.ex_;
+    auto& ey_  = sim.ey_;
+    auto& ex_T = sim.ex_T;
+    auto& ey_T = sim.ey_T;
+    auto& wt_T = sim.wt_T;
+
+    auto density  = sim.density;
+    auto velocity = sim.velocity;
+    auto reynolds = sim.reynolds;
+    auto xcount   = sim.grid_width;
+    auto ycount   = sim.grid_height;
 
     const float viscosity = velocity * std::sqrt(static_cast<float>(xcount * ycount)) / reynolds;
     const float tau = 0.5f + 3.0f * viscosity;
@@ -244,10 +302,6 @@ void collide_stream(SimulationQuantities& simulation)
     }
 
     // Keep the boundary conditions at the borders the same
-    // fplus.row(0)          = fnew.row(0);
-    // fplus.row(xcount - 1) = fnew.row(xcount - 1);
-    // fplus.col(0)          = fnew.col(0);
-    // fplus.col(ycount - 1) = fnew.col(ycount - 1);
     fplus = af::select(set_boundaries, f, fplus);
 
     // Update the particle distribution
@@ -286,34 +340,34 @@ void collide_stream(SimulationQuantities& simulation)
         int xshift = static_cast<int>(ex_vals[i]);
         int yshift = static_cast<int>(ey_vals[i]);
         if (xshift == 1)
-            f(         1,   af::span, oppos_vals[i]) = fnew_top(af::span, i);
+            f(         1,   af::span, opposite_indices[i]) = fnew_top(af::span, i);
         if (xshift == -1)
-            f(xcount - 2,   af::span, oppos_vals[i]) = fnew_bot(af::span, i);
+            f(xcount - 2,   af::span, opposite_indices[i]) = fnew_bot(af::span, i);
         if (yshift == 1)
-            f(  af::span,          1, oppos_vals[i]) = fnew_lft(af::span, i);
+            f(  af::span,          1, opposite_indices[i]) = fnew_lft(af::span, i);
         if (yshift == -1)
-            f(  af::span, ycount - 2, oppos_vals[i]) = fnew_rht(af::span, i);
+            f(  af::span, ycount - 2, opposite_indices[i]) = fnew_rht(af::span, i);
     }
 }
 
+
 /**
- * Updates the velocity field, density and strain at each point in the grid
-*/
-void update(SimulationQuantities& simulation)
+ * @brief Updates the velocity field, density and strain at each point in the grid
+ * 
+ */
+void update(Simulation& sim)
 {
-    auto& ux = simulation.ux;
-    auto& uy = simulation.uy;
-    auto& rho = simulation.rho;
-    auto& sigma = simulation.sigma;
-    auto& f = simulation.f;
-    auto& feq = simulation.feq;
+    auto& ux             = sim.ux;
+    auto& uy             = sim.uy;
+    auto& rho            = sim.rho;
+    auto& sigma          = sim.sigma;
+    auto& f              = sim.f;
+    auto& feq            = sim.feq;
+    auto& ex   = sim.ex;
+    auto& ey   = sim.ey;
 
-    auto xcount = simulation.grid_width;
-    auto ycount = simulation.grid_height;
-
-    auto f_tile = af::tile(f, af::dim4(1,1,1,3));
-    auto e_tile = af::join(3, af::constant(1, xcount, ycount, 9), ex_, ey_);
-    auto result = af::sum(f_tile * e_tile, 2);
+    auto e_tile = af::join(3, af::constant(1, 1, 1, 9), ex, ey);
+    auto result = af::sum(f * e_tile, 2);
 
     rho = result(af::span, af::span, af::span, 0);
     result /= rho;
@@ -322,38 +376,31 @@ void update(SimulationQuantities& simulation)
 
     // Above code equivalent to 
     // rho = af::sum(f, 2);
-    // ux = af::sum(f * ex_) / rho;
-    // uy = af::sum(f * ey_) / rho;
+    // ux = af::sum(f * ex, 2) / rho;
+    // uy = af::sum(f * ey, 2) / rho;
 
     auto product = f - feq;
-    auto temp = af::tile(product, af::dim4(1,1,1,3));
+    auto e_product = af::join(3, ex * ex, ex * ey * std::sqrt(2), ey * ey);
 
-    temp(af::span, af::span, af::span, 0) *= ex_ * ex_;
-    temp(af::span, af::span, af::span, 1) *= ey_ * ex_;
-    temp(af::span, af::span, af::span, 2) *= ey_ * ey_;
-    temp = af::sum(temp, 2);
-    temp *= temp;
+    sigma = af::sqrt(af::sum(af::pow(af::sum(product * e_product, 2), 2), 3));
 
-    sigma = af::sqrt(temp(af::span, af::span, af::span, 0) +
-                     temp(af::span, af::span, af::span, 1) * 2 +
-                     temp(af::span, af::span, af::span, 2));
-    
     // Above code equivalent to
-    // auto xx = af::sum(product * ex_ * ex_, 2);
-    // auto xy = af::sum(product * ex_ * ey_, 2);
-    // auto yy = af::sum(product * ey_ * ey_, 2);
+
+    // auto xx = af::sum(product * ex * ex, 2);
+    // auto xy = af::sum(product * ex * ey, 2);
+    // auto yy = af::sum(product * ey * ey, 2);
 
     // sigma = af::sqrt(xx * xx + xy * xy * 2 + yy * yy);
 }
 
-af::array generate_image(size_t width, size_t height, const SimulationQuantities& simulation)
+af::array generate_image(size_t width, size_t height, const Simulation& sim)
 {
-    const auto& ux = simulation.ux;
-    const auto& uy = simulation.uy;
-    const auto& boundaries = simulation.set_boundaries;
-    auto  velocity = simulation.velocity;
+    const auto& ux         = sim.ux;
+    const auto& uy         = sim.uy;
+    const auto& boundaries = sim.set_boundaries;
+          auto  velocity   = sim.velocity;
 
-    float image_scale = static_cast<float>(width) / static_cast<float>(simulation.grid_width);
+    float image_scale = static_cast<float>(width) / static_cast<float>(sim.grid_width);
 
     // Relative Flow speed at each cell
     auto val = af::sqrt(ux * ux + uy * uy) / velocity;
@@ -385,17 +432,15 @@ af::array generate_image(size_t width, size_t height, const SimulationQuantities
     return image;
 }
 
-int main(int argc, char** argv)
+void lattice_boltzmann_cfd_demo()
 {
-    int device = argc > 1 ? std::atoi(argv[1]) : 0;
-    af::setDevice(device);
-    af::info();
-
-    // Simulation Parameters
+    // Define the lattice for the simulation
     const size_t len = 128;
     const size_t grid_width = len;
     const size_t grid_height = len;
-    float scale = 1.0f;
+
+    // Specify the image scaling displayed
+    float scale = 4.0f;
     
     // Forge window initialization
     int height = static_cast<int>(grid_width * scale);
@@ -407,14 +452,9 @@ int main(int argc, char** argv)
     int simulation_frames = 100;
     float total_time = 0;
     float total_time2 = 0;
-
-    double avga = 0;
-    double avga2 = 0;
-    double avgb = 0;
-    double avgb2 = 0;
     
-    // Simulation code
-    const float density = 2.7f;
+    // CFD fluid parameters
+    const float density  = 2.7f;
     const float velocity = 0.35f;
     const float reynolds = 1e5f;
 
@@ -422,51 +462,52 @@ int main(int argc, char** argv)
     const char*           uy_image = "../../default_uy.bmp";
     const char* set_boundary_image = "../../default_boundary.bmp";
     
-    // const char*           ux_image = "../../left_tesla_ux.bmp";
-    // const char*           uy_image = "../../left_tesla_uy.bmp";
-    // const char* set_boundary_image = "../../left_tesla_boundary.bmp";
+    // Tesla Valve Fluid Simulation - entering from constricted side 
+    {
+        //           ux_image = "../../left_tesla_ux.bmp";
+        //           uy_image = "../../left_tesla_uy.bmp";
+        // set_boundary_image = "../../left_tesla_boundary.bmp";
+    }
 
-    // const char*           ux_image = "../../right_tesla_ux.bmp";
-    // const char*           uy_image = "../../right_tesla_uy.bmp";
-    // const char* set_boundary_image = "../../right_tesla_boundary.bmp";
+    // Tesla Valve Fluid Simulation - entering from transfer side 
+    {
+        //           ux_image = "../../right_tesla_ux.bmp";
+        //           uy_image = "../../right_tesla_uy.bmp";
+        // set_boundary_image = "../../right_tesla_boundary.bmp";
+    }
 
-    auto simulation = SimulationQuantities(grid_width, grid_height, density, velocity, reynolds);
+    // Reads the initial values of fluid quantites and simulation parameters
+    Simulation sim = create_simulation(grid_width, grid_height, density, velocity, reynolds,
+                                       ux_image, uy_image, set_boundary_image);
     
-    initialize(simulation, ux_image, uy_image, set_boundary_image);
+    // Initializes the simulation quantites 
+    initialize(sim);
 
     while(!window.close() && frame_count != max_frames)
     {
-
         af::sync();
         auto begin = std::chrono::high_resolution_clock::now();
 
-        collide_stream(simulation);
+        // Computes the new particle distribution functions for the new simulation frame
+        collide_stream(sim);
         
-        af::sync();
-        auto middle = std::chrono::high_resolution_clock::now();
-        
-        update(simulation);
+        // Updates the velocity, density, and stress fields 
+        update(sim);
         
         af::sync();
         auto end = std::chrono::high_resolution_clock::now();
 
-        auto dur = std::chrono::duration_cast<std::chrono::microseconds>(middle - begin).count();
-        auto dur2 = std::chrono::duration_cast<std::chrono::microseconds>(end - middle).count();
-        auto total = dur + dur2;
-
+        // Calculate computation time of 1 simulation frame
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
 
-        avga += dur;
-        avga2 += dur * dur;
-        avgb += dur2;
-        avgb2 += dur2 * dur2;
-
+        // Used for computing the distribution of frame computation time
         total_time += duration;
         total_time2 += duration * duration;
 
+        // Every number of `simulation_frames` display the last computed frame to the screen
         if (frame_count % simulation_frames == 0)
         {
-            auto image = generate_image(width, height, simulation);
+            auto image = generate_image(width, height, sim);
 
             // Display colored image
             window.image(image);
@@ -484,11 +525,26 @@ int main(int argc, char** argv)
         
         frame_count++;
     }
+}
 
-    std::cout << "First Part: (" << avga / frame_count << " +- " << std::sqrt(avga2 * frame_count - avga * avga) / frame_count
-              << ") us; Second Part: (" << avgb / frame_count << " +- " << std::sqrt(avgb2 * frame_count - avgb * avgb) / frame_count
-              << ") us; Total: (" << (avga + avgb) / frame_count << " +- " << std::sqrt(avga2 * frame_count - avga * avga + avgb2 * frame_count - avgb * avgb) / frame_count
-              << ") us" << std::endl;
+int main(int argc, char** argv)
+{
+    int device = argc > 1 ? std::atoi(argv[1]) : 0;
+
+    try
+    {
+        af::setDevice(device);
+        af::info();
+
+        std::cout << "** ArrayFire CFD Simulation Demo\n\n";
+
+        lattice_boltzmann_cfd_demo();
+    }
+    catch(const af::exception& e)
+    {
+        std::cerr << e.what() << std::endl;
+        return -1;
+    }
 
     return 0;
 }
