@@ -26,5 +26,5 @@ target_link_libraries(cfd PUBLIC ArrayFire::afcuda Forge::forge)
 add_executable(cfd2 cfd2.cpp)
 target_link_libraries(cfd2 PUBLIC ArrayFire::afcuda Forge::forge)
 
-add_executable(grad grad.cpp)
-target_link_libraries(grad PUBLIC ArrayFire::afcuda)
+# add_executable(grad grad.cpp)
+# target_link_libraries(grad PUBLIC ArrayFire::afcuda)
