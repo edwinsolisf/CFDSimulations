@@ -17,8 +17,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED true)
 add_executable(discrete discrete.cpp)
 target_link_libraries(discrete PUBLIC ArrayFire::afcuda Forge::forge)
 
+add_executable(smh smothered_hydrodynamics.cpp)
+target_link_libraries(smh PUBLIC ArrayFire::afcuda Forge::forge)
+
 add_executable(cfd cfd.cpp)
 target_link_libraries(cfd PUBLIC ArrayFire::afcuda Forge::forge)
 
 add_executable(cfd2 cfd2.cpp)
 target_link_libraries(cfd2 PUBLIC ArrayFire::afcuda Forge::forge)
+
+add_executable(grad grad.cpp)
+target_link_libraries(grad PUBLIC ArrayFire::afcuda)
