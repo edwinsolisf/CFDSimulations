@@ -74,8 +74,8 @@ Simulation create_simulation(uint32_t particle_count, uint32_t box_count, double
     min_y = range_y[0];
     max_y = range_y[1]; 
 
-    posX = af::randu(particle_count) * (max_x - min_x);
-    posY = af::randu(particle_count) * (max_y - min_y);
+    posX = af::randu(particle_count) * (max_x - min_x) * 1.0 / 4.f + (max_x - min_x) * (3./8.) + min_x;
+    posY = af::randu(particle_count) * (max_y - min_y) * 1.0 / 4.f + (max_x - min_x) * (3./4.) + min_y;
 
     velX = af::constant(0, particle_count);
     velY = af::constant(0, particle_count);
@@ -114,7 +114,7 @@ void compute_acceleration(Simulation& sim)
     const double normPoly = 4. / (af::Pi * std::pow(h, 8));
     const double normSpiky = 10. / (af::Pi * std::pow(h,5));
     const double normVisc = 10. / (3. * af::Pi * std::pow(h, 2));
-    const double m = density0 / (std::pow(h, 6) * normPoly);
+    const double m = density0 * af::Pi * std::pow(h, 2);
 
     uint32_t avg_count = particle_count / box_count;
 
@@ -187,7 +187,6 @@ void compute_acceleration(Simulation& sim)
     density = af::sum(af::dense(af::sparse(particle_count, particle_count, m * normPoly * af::pow(h * h - dr2, 3), other_row_indices, other_col_indices)), 1);
     density += af::constant(m * normPoly * std::pow(h, 6), particle_count);
     density = density(indices);
-    density.eval();
 
     auto boxRho = af::unwrap(density(indices), avg_count, 1, avg_count, 1);
     boxRho = af::reorder(boxRho, 0, 2, 1);
@@ -201,7 +200,6 @@ void compute_acceleration(Simulation& sim)
     auto kernelViscprime2 = normVisc * 9 * (h - dr) / (2 * std::pow(h, 3));
 
     auto gradP = kernelSpikyprime * pressure_const * (rho + rho_T - density0 * 2) / (rho * rho_T);
-    // auto gradP = kernelSpikyprime * pressure_const * (1 / rho + 1/rho_T);
 
     auto kernelPolyprime2 = normPoly * (24 * dr2 * delta_h2r2 - 6 * af::pow(delta_h2r2, 2));
     auto delta_r_delta_v_frac = (dx * delta_vx + dy * delta_vy) / dr;
@@ -213,32 +211,25 @@ void compute_acceleration(Simulation& sim)
     auto rhodtgradx = (delta_r_delta_v_frac * dx * (kernelPolyprime / dr - kernelPolyprime2) - kernelPolyprime * delta_vx) / dr;
     auto rhodtgrady = (delta_r_delta_v_frac * dy * (kernelPolyprime / dr - kernelPolyprime2) - kernelPolyprime * delta_vy) / dr;
     
-    auto avg_density = (rho + rho_T) / 2;
+    auto avg_density = density0;
     auto graddivx = (rhodt * rhogradx / avg_density - rhodtgradx) / avg_density;
     auto graddivy = (rhodt * rhogrady / avg_density - rhodtgrady) / avg_density;
 
     af::replace(graddivx, !af::isNaN(graddivx), -6 * normPoly * std::pow(h, 4) * delta_vx / avg_density);
     af::replace(graddivy, !af::isNaN(graddivy), -6 * normPoly * std::pow(h, 4) * delta_vy / avg_density);
 
-    auto ax = (gradP * dx + viscosity * delta_vx * kernelViscprime2 / (rho * rho_T) + graddivx * (viscosity) / (3 * avg_density)) * m;
-    auto ay = (gradP * dy + viscosity * delta_vy * kernelViscprime2 / (rho * rho_T) + graddivy * (viscosity) / (3 * avg_density)) * m;
+    auto ax = (gradP * dx + viscosity * delta_vx * kernelViscprime2 / (rho * rho_T) + graddivx * viscosity / (3 * avg_density)) * m;
+    auto ay = (gradP * dy + viscosity * delta_vy * kernelViscprime2 / (rho * rho_T) + graddivy * viscosity / (3 * avg_density)) * m;
 
     aX = af::sum(af::dense(af::sparse(particle_count, particle_count, ax, other_row_indices, other_col_indices)), 1);
     aY = af::sum(af::dense(af::sparse(particle_count, particle_count, ay, other_row_indices, other_col_indices)), 1) - g;
+
+    // auto diffRho = af::sum(af::dense(af::sparse(particle_count, particle_count, rhodt * m, other_row_indices, other_col_indices)), 1);
+    // af::replace(diffRho, !af::isNaN(diffRho), 0);
+    // density += diffRho(indices) * sim.time_step;
     
     aX = aX(indices);
     aY = aY(indices);
-
-    // if (pair_count > std::pow(particle_count * 0.2, 2))
-    // {
-    //     h = std::sqrt(static_cast<double>(pair_count) / static_cast<double>(particle_count * particle_count)) * 0.1;
-    //     std::cout << "h: " << h << "\n";
-    // }
-    // else if (pair_count < 15)
-    // {
-    //     h *= 2;
-    //     std::cout << "h: " << h << "\n";
-    // }
 }
 
 void update(Simulation& sim)
@@ -260,8 +251,40 @@ void update(Simulation& sim)
     auto particle_count = sim.particle_count;
     auto pressure_const = sim.pressure_constant;
 
+    double xlftp = min_x + (max_x - min_x) * 5.0 / 16.0;
+    double ylftp = min_y + (max_y - min_y) * 3.0 / 4.0; 
+    double xlfbt = min_x + (max_x - min_x) * 7.0 / 16.0;
+    double ylfbt = min_y + (max_y - min_y) * 1.0 / 2.0; 
+    double xrhtp = min_x + (max_x - min_x) * 11.0 / 16.0;
+    double yrhtp = min_y + (max_y - min_y) * 3.0 / 4.0;
+    double xrhbt = min_x + (max_x - min_x) * 9.0 / 16.0;
+    double yrhbt = min_y + (max_y - min_y) * 1.0 / 2.0;
+
+
     velX += aX * dt / 2.;
     velY += aY * dt / 2.;
+
+
+    auto tlf = (xlftp - posX) * (-velY) - (ylftp - posY) * (-velX);
+    auto ulf = (xlftp - posX) * (ylftp - ylfbt) - (ylftp - posY) * (xlftp - xlfbt);
+
+    auto trh = (xrhtp - posX) * (-velY) - (yrhtp - posY) * (-velX);
+    auto urh = (xrhtp - posX) * (yrhtp - yrhbt) - (yrhtp - posY) * (xrhtp - xrhbt);
+
+    auto max_lf = (xlftp - xlfbt) * (-velY) - (ylftp - ylfbt) * (-velX);
+    auto max_rh = (xrhtp - xrhbt) * (-velY) - (yrhtp - yrhbt) * (-velX);
+
+    af::eval(tlf, ulf, trh, urh);
+    af::eval(max_lf, max_rh);
+
+    auto m = -(ylftp - ylfbt) / (xlftp - xlfbt);
+    auto dot_lf = (velX + velY * 1.0 / m) / (1 + std::pow(1.0 / m, 2));
+    auto dot_rh = (velX - velY * 1.0 / m) / (1 + std::pow(1.0 / m, 2));
+
+    af::replace(velX, !((tlf / max_lf) >= 0 && (tlf / max_lf) <= 1 && (ulf / max_lf) >= 0 && (ulf / max_lf) <= dt), velX - (1 + restitution) * dot_lf * 1.0);
+    af::replace(velY, !((tlf / max_lf) >= 0 && (tlf / max_lf) <= 1 && (ulf / max_lf) >= 0 && (ulf / max_lf) <= dt), velY - (1 + restitution) * dot_lf * 1.0 / m);
+    af::replace(velX, !((trh / max_rh) >= 0 && (trh / max_rh) <= 1 && (urh / max_rh) >= 0 && (urh / max_rh) <= dt), velX - (1 + restitution) * dot_rh * 1.0);
+    af::replace(velY, !((trh / max_rh) >= 0 && (trh / max_rh) <= 1 && (urh / max_rh) >= 0 && (urh / max_rh) <= dt), velY - (1 + restitution) * dot_rh * -1.0 / m);
 
     posX += velX * dt;
     posY += velY * dt;
@@ -272,15 +295,12 @@ void update(Simulation& sim)
     auto condYmin = posY > min_y;
     auto condYmax = posY < max_y;
 
-    posX = af::select(condXmin, posX, min_x + 0.001);
-    posX = af::select(condXmax, posX, max_x - 0.001);
-    velX = af::select(condXmin, velX, -velX * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
-    velX = af::select(condXmax, velX, -velX * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
-    
-    posY = af::select(condYmin, posY, min_y + 0.001);
-    posY = af::select(condYmax, posY, max_y - 0.001);
-    velY = af::select(condYmin, velY, -velY * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
-    velY = af::select(condYmax, velY, -velY * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
+    af::replace(posX, condXmin, min_x + 0.001);
+    af::replace(posX, condXmax, max_x - 0.001);
+    af::replace(posY, condYmin, min_y + 0.001);
+    af::replace(posY, condYmax, max_y - 0.001);
+    af::replace(velX, condXmin && condXmax, -velX * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
+    af::replace(velY, condYmin && condYmax, -velY * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
     
     velX += aX * dt / 2.;
     velY += aY * dt / 2.;
@@ -292,12 +312,12 @@ af::array generate_image(uint32_t width, uint32_t height, const Simulation& sim)
     const auto& posY = sim.posY;
 
     auto particle_count = sim.particle_count;
-    auto x_min = sim.min_x;
-    auto x_max = sim.max_x;
-    auto y_min = sim.min_y;
-    auto y_max = sim.max_y;
+    auto min_x = sim.min_x;
+    auto max_x = sim.max_x;
+    auto min_y = sim.min_y;
+    auto max_y = sim.max_y;
 
-    auto indices = af::sort(af::floor(posX * (width - 1) / (x_max - x_min)) * height + af::floor(posY * (height - 1) / (y_max - y_min))).as(s32);
+    auto indices = af::sort(af::floor(posX * (width - 1) / (max_x - min_x)) * height + af::floor(posY * (height - 1) / (max_y - min_y))).as(s32);
     af::array valid_indices, valid_indices_count;
 
     af::sumByKey(valid_indices, valid_indices_count, indices, af::constant(1, particle_count, s32), 0);
@@ -318,6 +338,28 @@ af::array generate_image(uint32_t width, uint32_t height, const Simulation& sim)
     auto image = af::constant(0, width, height, 3);
 
     image(af::span, af::span, 0) = af::flip(tmp,1);
+
+    double xlftp = min_x + (max_x - min_x) * 5.0 / 16.0;
+    double ylftp = min_y + (max_y - min_y) * 3.0 / 4.0; 
+    double xlfbt = min_x + (max_x - min_x) * 7.0 / 16.0;
+    double ylfbt = min_y + (max_y - min_y) * 1.0 / 2.0; 
+    double xrhtp = min_x + (max_x - min_x) * 11.0 / 16.0;
+    double yrhtp = min_y + (max_y - min_y) * 3.0 / 4.0;
+    double xrhbt = min_x + (max_x - min_x) * 9.0 / 16.0;
+    double yrhbt = min_y + (max_y - min_y) * 1.0 / 2.0;
+
+    uint32_t wlf = std::abs(xlftp - xlfbt) * width / (max_x - min_x);
+    uint32_t hlf = std::abs(ylftp - ylfbt) * height / (max_y - min_y);
+
+    auto t = af::iota(wlf + hlf) / (wlf + hlf - 1);
+    auto wlfindices = -af::floor(t * wlf) + xlfbt * width / (max_x - min_x);
+    auto hlfindices = -af::floor(t * hlf) + ylfbt * height / (max_y - min_y);
+
+    auto wrhindices = af::floor(t * wlf) + xrhbt * width / (max_x - min_x);
+    auto hrhindices = -af::floor(t * hlf) + yrhbt * height / (max_y - min_y);
+
+    image(wlfindices + hlfindices * width + width * height) = 1;
+    image(wrhindices + hrhindices * width + width * height) = 1;
 
     return image.T();
 }
@@ -340,14 +382,14 @@ void smh_cfd_demo()
     double total_time = 0;
     double total_time2 = 0;
 
-    uint32_t particle_count = 1000;
-    uint32_t box_count = 8;
+    uint32_t particle_count = 2000;
+    uint32_t box_count = 20;
     double restitution = 0.5f;
     double fluid_density = 1000;
     double viscosity = 0.1e0;
-    double temperature = 1.e0f;
-    double h = 0.01f;
-    double g = 1.f;
+    double temperature = 1.0e0f;
+    double h = 0.025;
+    double g = 1.;
     double dt = 0.005f;
 
     Simulation sim = create_simulation(particle_count, box_count, dt, restitution, fluid_density, temperature, viscosity, h, g,
