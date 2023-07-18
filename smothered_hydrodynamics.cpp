@@ -143,6 +143,7 @@ void compute_acceleration(Simulation& sim)
     auto valid = dr2 < (h * h);
     auto sparse_valid = valid.as(f32) - af::identity(avg_count, avg_count, f32);
     auto other_indices = af::where(af::flat(sparse_valid));
+    auto pair_count = other_indices.dims()[0];
 
     if (other_indices.isempty())
     {
@@ -152,20 +153,21 @@ void compute_acceleration(Simulation& sim)
         return;
     }
 
-    auto other_row_indices = other_indices / particle_count;
-    af::array keys, vals;
-    af::sumByKey(keys, vals, other_row_indices.as(s32), af::constant(1, other_row_indices.dims()[0]));
+    auto row_indices = other_indices / particle_count;
+    auto sum_sparse = [&row_indices, particle_count](const af::array& arr)
+    {
+        af::array nnz_indices;
+        af::array nnz_vals;
 
-    other_row_indices = af::constant(0, particle_count + 1, s32);
-    other_row_indices(keys.as(s32) + 1) = vals.as(s32);
-    other_row_indices = af::accum(other_row_indices);
+        af::sumByKey(nnz_indices, nnz_vals, row_indices, arr);
 
-    auto other_col_indices = other_indices % particle_count;
-    other_col_indices = other_col_indices.as(s32);
-    auto pair_count = other_col_indices.dims()[0];
+        af::array all_vals = af::constant(0, particle_count);
+        all_vals(nnz_indices) = nnz_vals;
+
+        return all_vals;
+    };
 
     auto box_indices = af::lookup(af::flat(boxIndices), other_indices);
-
 
     dx = af::lookup(af::flat(dx), other_indices);
     dy = af::lookup(af::flat(dy), other_indices);
@@ -184,7 +186,7 @@ void compute_acceleration(Simulation& sim)
     auto delta_vy = boxVelY - boxVelY.T();
     delta_vy = af::lookup(af::flat(delta_vy), other_indices);
 
-    density = af::sum(af::dense(af::sparse(particle_count, particle_count, m * normPoly * af::pow(h * h - dr2, 3), other_row_indices, other_col_indices)), 1);
+    density = sum_sparse(m * normPoly * af::pow(h * h - dr2, 3));
     density += af::constant(m * normPoly * std::pow(h, 6), particle_count);
     density = density(indices);
 
@@ -221,13 +223,13 @@ void compute_acceleration(Simulation& sim)
     auto ax = (gradP * dx + viscosity * delta_vx * kernelViscprime2 / (rho * rho_T) + graddivx * viscosity / (3 * avg_density)) * m;
     auto ay = (gradP * dy + viscosity * delta_vy * kernelViscprime2 / (rho * rho_T) + graddivy * viscosity / (3 * avg_density)) * m;
 
-    aX = af::sum(af::dense(af::sparse(particle_count, particle_count, ax, other_row_indices, other_col_indices)), 1);
-    aY = af::sum(af::dense(af::sparse(particle_count, particle_count, ay, other_row_indices, other_col_indices)), 1) - g;
+    aX = sum_sparse(ax);
+    aY = sum_sparse(ay) - g;
 
     // auto diffRho = af::sum(af::dense(af::sparse(particle_count, particle_count, rhodt * m, other_row_indices, other_col_indices)), 1);
     // af::replace(diffRho, !af::isNaN(diffRho), 0);
     // density += diffRho(indices) * sim.time_step;
-    
+
     aX = aX(indices);
     aY = aY(indices);
 }
@@ -251,6 +253,11 @@ void update(Simulation& sim)
     auto particle_count = sim.particle_count;
     auto pressure_const = sim.pressure_constant;
 
+    velX += aX * dt / 2.;
+    velY += aY * dt / 2.;
+
+    // Test for collision with funnel
+
     double xlftp = min_x + (max_x - min_x) * 5.0 / 16.0;
     double ylftp = min_y + (max_y - min_y) * 3.0 / 4.0; 
     double xlfbt = min_x + (max_x - min_x) * 7.0 / 16.0;
@@ -259,11 +266,6 @@ void update(Simulation& sim)
     double yrhtp = min_y + (max_y - min_y) * 3.0 / 4.0;
     double xrhbt = min_x + (max_x - min_x) * 9.0 / 16.0;
     double yrhbt = min_y + (max_y - min_y) * 1.0 / 2.0;
-
-
-    velX += aX * dt / 2.;
-    velY += aY * dt / 2.;
-
 
     auto tlf = (xlftp - posX) * (-velY) - (ylftp - posY) * (-velX);
     auto ulf = (xlftp - posX) * (ylftp - ylfbt) - (ylftp - posY) * (xlftp - xlfbt);
@@ -274,21 +276,26 @@ void update(Simulation& sim)
     auto max_lf = (xlftp - xlfbt) * (-velY) - (ylftp - ylfbt) * (-velX);
     auto max_rh = (xrhtp - xrhbt) * (-velY) - (yrhtp - yrhbt) * (-velX);
 
-    af::eval(tlf, ulf, trh, urh);
-    af::eval(max_lf, max_rh);
+    // af::eval(tlf, ulf, trh, urh);
+    // af::eval(max_lf, max_rh);
 
     auto m = -(ylftp - ylfbt) / (xlftp - xlfbt);
     auto dot_lf = (velX + velY * 1.0 / m) / (1 + std::pow(1.0 / m, 2));
     auto dot_rh = (velX - velY * 1.0 / m) / (1 + std::pow(1.0 / m, 2));
 
-    af::replace(velX, !((tlf / max_lf) >= 0 && (tlf / max_lf) <= 1 && (ulf / max_lf) >= 0 && (ulf / max_lf) <= dt), velX - (1 + restitution) * dot_lf * 1.0);
-    af::replace(velY, !((tlf / max_lf) >= 0 && (tlf / max_lf) <= 1 && (ulf / max_lf) >= 0 && (ulf / max_lf) <= dt), velY - (1 + restitution) * dot_lf * 1.0 / m);
-    af::replace(velX, !((trh / max_rh) >= 0 && (trh / max_rh) <= 1 && (urh / max_rh) >= 0 && (urh / max_rh) <= dt), velX - (1 + restitution) * dot_rh * 1.0);
-    af::replace(velY, !((trh / max_rh) >= 0 && (trh / max_rh) <= 1 && (urh / max_rh) >= 0 && (urh / max_rh) <= dt), velY - (1 + restitution) * dot_rh * -1.0 / m);
+    auto condLf = !((tlf / max_lf) >= 0 && (tlf / max_lf) <= 1 && (ulf / max_lf) >= 0 && (ulf / max_lf) <= dt);
+    auto condRh = !((trh / max_rh) >= 0 && (trh / max_rh) <= 1 && (urh / max_rh) >= 0 && (urh / max_rh) <= dt);
 
+    af::replace(velX, condLf, velX - (1 + restitution) * dot_lf * 1.0);
+    af::replace(velY, condLf, velY - (1 + restitution) * dot_lf * 1.0 / m);
+    af::replace(velX, condRh, velX - (1 + restitution) * dot_rh * 1.0);
+    af::replace(velY, condRh, velY - (1 + restitution) * dot_rh * -1.0 / m);
+
+    // Move position 
     posX += velX * dt;
     posY += velY * dt;
 
+    // Check for wall collision
     auto condXmin = posX > min_x;
     auto condXmax = posX < max_x;
 
@@ -302,6 +309,7 @@ void update(Simulation& sim)
     af::replace(velX, condXmin && condXmax, -velX * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
     af::replace(velY, condYmin && condYmax, -velY * restitution + af::randu(particle_count) * 0.5e0 * std::sqrt(pressure_const));
     
+    // Leap Frog Velocity
     velX += aX * dt / 2.;
     velY += aY * dt / 2.;
 }
